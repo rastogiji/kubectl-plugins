@@ -3,6 +3,8 @@ set -eo pipefail
 
 SCRIPT_NAME=$(basename "$0")
 POD_PREFIX="ssh-pod"
+POD_SUFFIX="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6; echo)"
+
 NAMESPACE=$(kubectl config view --minify --output 'jsonpath={..namespace}')
 if [ -z "$NAMESPACE" ]; then
     NAMESPACE="default"
@@ -45,7 +47,7 @@ validate_node() {
 
 create_and_exec_pod() {
     local node="$1"
-    local pod_name="$POD_PREFIX-$node"
+    local pod_name="$POD_PREFIX-$node-$POD_SUFFIX"
 
     cat <<EOF | kubectl apply -f - -n "$NAMESPACE" >/dev/null
 apiVersion: v1
@@ -97,7 +99,7 @@ EOF
 
 cleanup() {
     echo "Script interrupted"
-    delete_pod "$POD_PREFIX-$1"
+    delete_pod "$POD_PREFIX-$1-$POD_SUFFIX"
     exit 1
 }
 
