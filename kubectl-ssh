@@ -1,0 +1,110 @@
+#!/bin/bash
+set -eo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+POD_PREFIX="ssh-pod"
+NAMESPACE="default"
+print_usage() {
+    echo "Usage: $SCRIPT_NAME [node name]"
+    echo "  -h, --help         Display this help message"
+}
+
+delete_pod() {
+    local pod_name="$1"
+    echo "Deleting the pod $pod_name in the background..."
+    kubectl delete pod "$pod_name" --wait=false >/dev/null 2>&1 &
+}
+
+fetch_nodes() {
+    kubectl get nodes -o=jsonpath='{.items[*].metadata.name}' | tr ' ' '\n'
+}
+
+validate_node() {
+    local node="$1"
+    local nodes
+    nodes=$(fetch_nodes)
+    
+    if ! echo "$nodes" | grep -q "^${node}$"; then
+        echo "Error: Node '$node' does not exist in the cluster." >&2
+        exit 1
+    fi
+}
+
+create_and_exec_pod() {
+    local node="$1"
+    local pod_name="$POD_PREFIX-$node"
+
+    cat <<EOF | kubectl apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod_name
+spec:
+  nodeName: $node
+  containers:
+  - name: ssh-pod
+    image: busybox:stable
+    imagePullPolicy: IfNotPresent
+    command: ["chroot", "/host"]
+    tty: true
+    stdin: true
+    stdinOnce: true
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: host
+      mountPath: /host
+  volumes:
+  - name: host
+    hostPath:
+      path: /
+  hostNetwork: true
+  hostIPC: true
+  hostPID: true
+  restartPolicy: Never
+  tolerations:
+  - operator: "Exists"
+EOF
+
+    echo "Waiting for pod to be running..."
+    if ! kubectl wait --for=condition=ready pod "$pod_name" --timeout=60s; then
+        echo "Error: Pod failed to become ready within 60 seconds" >&2
+        delete_pod "$pod_name"
+        exit 1
+    fi
+
+    if ! kubectl exec -it "$pod_name" -- sh; then
+        echo "Error: Failed to execute shell in the pod" >&2
+        delete_pod "$pod_name"
+        exit 1
+    fi
+
+    delete_pod "$pod_name"
+}
+
+cleanup() {
+    echo "Script interrupted"
+    delete_pod "$POD_PREFIX-$1"
+    exit 1
+}
+
+trap cleanup INT TERM
+
+main() {
+    if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+        print_usage
+        exit 0
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        echo "Error: Node name is required" >&2
+        print_usage
+        exit 1
+    fi
+
+    local node="$1"
+    validate_node "$node"
+    create_and_exec_pod "$node"
+}
+
+main "$@"
