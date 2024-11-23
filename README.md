@@ -9,3 +9,10 @@ echo "export PATH=$PATH:$HOME/kubectl-plugins" >> $HOME/.zshrc
 source $HOME/.zshrc
 ```
 
+## Usage
+### kubectl ssh
+```bash
+    kubectl ssh [-n|--namespace <namespace>] [node name]
+    -n, --namespace    Specify the namespace (uses current context namespace if not specified)
+    -h, --help         Display this help message"
+```
