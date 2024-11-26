@@ -16,3 +16,12 @@ source $HOME/.zshrc
     -n, --namespace    Specify the namespace (uses current context namespace if not specified)
     -h, --help         Display this help message"
 ```
+
+### kubectl silence
+```bash
+    kubectl silence [alertname]
+    -s, --service    Specify Alertmanager service name(Required)
+    -d, --duration   Specify the duration for which the alert should be silenced(12H|M|S)
+    -n, --namespace  Specify the namespace
+    -h, --help       Display this help message
+```
