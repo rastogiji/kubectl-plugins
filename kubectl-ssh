@@ -82,7 +82,7 @@ spec:
 EOF
 
     echo "Waiting for pod to be running in $NAMESPACE namespace..."
-    if ! kubectl wait --for=condition=ready pod "$pod_name" -n "$NAMESPACE" --timeout=60s; then
+    if ! kubectl wait --for=condition=ready pod "$pod_name" -n "$NAMESPACE" --timeout=120s >/dev/null; then
         echo "Error: Pod failed to become ready within 60 seconds" >&2
         delete_pod "$pod_name"
         exit 1
