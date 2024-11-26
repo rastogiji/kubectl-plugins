@@ -1,0 +1,182 @@
+#!/bin/bash
+
+# kubectl silence <alertname> -s|--service=<service-name> -n|--namespace <namespace>
+set -eo pipefail
+
+NAMESPACE="monitoring-system"
+POD_PREFIX="alert-silencer"
+DURATION="12H"
+POD_SUFFIX="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6; echo)"
+
+validate_duration() {
+    local duration="$1"
+    if ! echo "$duration" | grep -qE "^[0-9]+[HMS]$"; then
+        echo "Error: Invalid duration format. Please use the format <number><H|M|S>." >&2
+        exit 1
+    fi
+}
+validate_namespace() {
+    local namespace="$1"
+    if ! kubectl get namespace "$namespace" >/dev/null 2>&1; then
+        echo "Error: Namespace '$namespace' does not exist." >&2
+        exit 1
+    fi
+}
+
+validate_service() {
+    local service="$1"
+    local namespace="$2"
+    if ! kubectl get service "$service" -n "$namespace" >/dev/null 2>&1; then
+        echo "Error: Alertmanager service '$service' does not exist in the namespace '$namespace'." >&2
+        exit 1
+    fi
+}
+delete_pod() {
+    local pod_name="$1"
+    local namespace="$2"
+    echo "Deleting the pod $pod_name in the $namespace namespace"
+    kubectl delete pod "$pod_name" -n "$namespace" --wait=false >/dev/null 2>&1 &
+}
+
+print_usage() {
+    echo "kubectl silence [alertname]"
+    echo "  -s, --service    Specify Alertmanager service name(Required)"
+    echo "  -d, --duration   Specify the duration for which the alert should be silenced(12H|M|S)"
+    echo "  -n, --namespace  Specify the namespace"
+    echo "  -h, --help       Display this help message"
+}
+
+create_and_make_request() {
+    local alertname="$1"
+    local service="$2"
+    local namespace="$3"
+    local duration="$4"
+    local pod_name="$POD_PREFIX-$POD_SUFFIX"
+    local starts_at="$(date -u -v+2M +"%Y-%m-%dT%H:%M:%SZ")"
+    local ends_at="$(date -u -v+"$duration" +"%Y-%m-%dT%H:%M:%SZ")"
+    local created_by="$(whoami)(COPS)"
+    local comment="Silence created by $created_by"
+    cat <<EOF | kubectl apply -f - -n "$namespace" >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod_name
+  namespace: $namespace
+  labels:
+    app: alert-silencer
+spec:
+  containers:
+  - name: alert-silencer
+    image: arm64v8/alpine:3.17
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 5m
+        memory: 50Mi
+      limits:
+        cpu: 10m
+        memory: 50Mi
+    command:
+    - sh
+    - "-c"
+    - "apk add --no-cache curl && curl -X POST -H 'Content-Type: application/json' -d '{\"startsAt\": \"$starts_at\", \"endsAt\": \"$ends_at\", \"createdBy\": \"$created_by\", \"comment\": \"$comment\", \"matchers\": [{\"name\": \"alertname\", \"value\": \"$alertname\", \"isRegex\": false, \"isEqual\": true}]}' http://$service:9093/api/v2/silences"
+  restartPolicy: Never
+EOF
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create the pod." >&2
+        return 1
+    fi
+
+    echo "Waiting for pod $pod_name to complete..."
+    if ! kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].reason}'=PodCompleted pod/$pod_name -n "$namespace" --timeout=120s; then
+        echo "Error: Pod did not complete within the timeout period." >&2
+        delete_pod "$pod_name" "$namespace"
+        return 1
+    fi
+
+    echo "Checking pod logs to see if silence was created successfully..."
+    local pod_logs=$(kubectl logs "$pod_name" -n "$namespace")
+    if echo "$pod_logs" | grep -q "silenceID"; then
+        echo "Silence created for $alertname for $duration"
+    else
+        echo "Error: Failed to create silence. Pod logs:" >&2
+        echo "$pod_logs" >&2
+        delete_pod "$pod_name" "$namespace"
+        return 1
+    fi
+    delete_pod "$pod_name" "$namespace"
+}
+
+cleanup() {
+    echo "Script interrupted"
+    delete_pod "$POD_PREFIX-$POD_SUFFIX" "$NAMESPACE"
+    exit 1
+}
+
+trap cleanup INT TERM
+
+main() {
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            -s|--service)
+                if [[ -z "$2" || "$2" =~ ^- ]]; then
+                    echo "Error: '-s|--service' requires a value." >&2
+                    print_usage
+                    exit 1
+                fi
+                SERVICE="$2"
+                shift 2
+                ;;
+            -n|--namespace)
+                if [[ -z "$2" || "$2" =~ ^- ]]; then
+                    echo "Error: '-n|--namespace' requires a value." >&2
+                    print_usage
+                    exit 1
+                fi
+                NAMESPACE="$2"
+                shift 2
+                ;;
+            -d|--duration)
+                if [[ -z "$2" || "$2" =~ ^- ]]; then
+                    echo "Error: '-d|--duration' requires a value." >&2
+                    print_usage
+                    exit 1
+                fi
+                DURATION="$2"
+                shift 2
+                ;;
+            *)
+                if [[ -z "${ALERTNAME:-}" ]]; then
+                    ALERTNAME="$1"
+                    shift
+                else
+                    echo "Error: Multiple alertnames specified. Please provide only one alertname." >&2
+                    print_usage
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+    if [[ -z "${ALERTNAME:-}" ]]; then
+        echo "Error: Alertname is required." >&2
+        print_usage
+        exit 1
+    fi
+
+    if [[ -z "${SERVICE:-}" ]]; then
+        echo "Error: Service name is required." >&2
+        print_usage
+        exit 1
+    fi
+
+    validate_namespace "$NAMESPACE"
+    validate_service "$SERVICE" "$NAMESPACE"
+    validate_duration "$DURATION"
+    create_and_make_request "$ALERTNAME" "$SERVICE" "$NAMESPACE" "$DURATION"
+}
+
+main "$@"
